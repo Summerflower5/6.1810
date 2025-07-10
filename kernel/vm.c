@@ -488,9 +488,37 @@ copyinstr(pagetable_t pagetable, char *dst, uint64 srcva, uint64 max)
 
 
 #ifdef LAB_PGTBL
+// Recursively print page-table pages.
+void
+RecursivePrint(pagetable_t pagetable, int depth, uint64 va)
+{
+  // there are 2^9 = 512 PTEs in a page table.
+  for(uint64 i = 0; i < 512; i++){
+    pte_t pte = pagetable[i];
+    if(!(pte & PTE_V)) continue;
+    uint64 child = PTE2PA(pte);
+    for(int j = 0 ; j < depth ; j++){
+      printf(" ..");
+    }
+    uint64 child_va = va + (i<<(12 + (3-depth)*9)); // 注意移位溢出
+    printf("%p:", (void*)child_va);
+    printf(" pte %p", (void*)pte);
+    printf(" pa %p\n", (void*)PTE2PA(pte));
+
+    if((pte & PTE_V) && (pte & (PTE_R|PTE_W|PTE_X)) == 0){
+      RecursivePrint((pagetable_t)child, depth + 1, child_va);
+    }
+    
+  }
+  
+}
+
+
 void
 vmprint(pagetable_t pagetable) {
   // your code here
+  printf("page table %p\n",pagetable);
+  RecursivePrint(pagetable, 1, 0);
 }
 #endif
 
