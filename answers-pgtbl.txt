@@ -1,0 +1,26 @@
+实现superpage时遇到了困难，bug调试了很久
+
+在sbrkmuch部分出错，panic发生在执行 
+  c = sbrk(-(sbrk(0) - oldbrk));
+
+va=最高的和superpage对齐的虚拟地址 pte=0
+uvmunmap: not mapped
+
+发现最后一个superpage被错误地unmap了
+
+回顾我的实现，首先我预留了高物理地址一部分作为superpage
+uvmalloc分配时先分配普通页，和superpage对齐后能分配superpage就分配superpage
+再看测试，sbrk将内存向高虚拟地址处拓展
+由于sbrkmuch中拓展的和superpage对齐，因此最后肯定是分配的superpage
+
+sbrkmuch中，先减少一页，又增加一页，显然问题出现在这里
+减少一页时，unmap错误地清除了superpage pte
+
+于是我想，分裂超级页太麻烦，先不清除pte吧
+那么superpage pte清除的时机应该在va和superpage对齐时
+
+但是还是这个panic，debug很久，最后发现在unmap里，va是起始，a才是应该用的！！！！！
+把unmap打印出来才发现，这怎么va都一样......
+
+然后就顺畅了，注意这样需要在unmap映射到superpage的va时，虽然不清pte，但要把页面清空
+对应的，在mappage时，注意重复pte（因为没清），这时需要把分配的普通页free掉
