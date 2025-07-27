@@ -1,0 +1,8 @@
+1.  a0 a1 a2
+    a2 
+2.  no, the compiler calculates
+3.  6bc
+4.  4501
+5.  He110 World​
+    yes. no. immediate value
+6.  继续读取栈中后续内存位置的数据解释为%d​
