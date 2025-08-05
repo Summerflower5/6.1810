@@ -65,6 +65,25 @@ usertrap(void)
     intr_on();
 
     syscall();
+  } else if(r_scause() == 15){
+    // Store/AMO Page Fault
+    pte_t *pte;
+    uint64 stval = r_stval();
+    if(stval < MAXVA && (pte = walk(p->pagetable, stval, 0)) && (*pte & PTE_COW)){
+      char *mem;
+      if((mem = kalloc()) == 0){
+        setkilled(p);
+        goto kill_handled;
+      }
+      uint64 pa = PTE2PA(*pte);
+      uint flags = (PTE_FLAGS(*pte) & (~PTE_COW)) | PTE_W;
+      *pte = PA2PTE(mem) | flags;
+      memmove(mem, (char *)pa, PGSIZE);
+      kfree((void *)pa);
+    }else {
+      setkilled(p);
+      goto kill_handled;
+    }
   } else if((which_dev = devintr()) != 0){
     // ok
   } else {
@@ -73,6 +92,7 @@ usertrap(void)
     setkilled(p);
   }
 
+  kill_handled:
   if(killed(p))
     exit(-1);
 
