@@ -17,6 +17,20 @@ static uint32 local_ip = MAKE_IP_ADDR(10, 0, 2, 15);
 // qemu host's ethernet address.
 static uint8 host_mac[ETHADDR_LEN] = { 0x52, 0x55, 0x0a, 0x00, 0x02, 0x02 };
 
+struct port{
+  int binded;
+  int head;
+  int tail;
+  struct pact{
+    int src;
+    short sport;
+    int length;
+    char *buf;
+  }packetq[16];
+}ports[65536];
+
+#define PORT_BUF_SIZE 16
+
 static struct spinlock netlock;
 
 void
@@ -37,8 +51,13 @@ sys_bind(void)
   //
   // Your code here.
   //
-
-  return -1;
+  int port;
+  argint(0, &port);
+  acquire(&netlock);
+  memset(&ports[port], 0, sizeof(ports[port]));
+  ports[port].binded = 1;
+  release(&netlock);
+  return 0;
 }
 
 //
@@ -52,7 +71,17 @@ sys_unbind(void)
   //
   // Optional: Your code here.
   //
-
+  int port;
+  argint(0, &port);
+  acquire(&netlock);
+  for(int i = ports[port].head ; i < ports[port].tail ; i++){
+    if(ports[port].packetq[i].buf){
+      kfree((void *)ports[port].packetq[i].buf);
+      ports[port].packetq[i].buf = 0;
+    }
+  }
+  memset(&ports[port], 0, sizeof(ports[port]));
+  release(&netlock);
   return 0;
 }
 
@@ -77,7 +106,50 @@ sys_recv(void)
   //
   // Your code here.
   //
-  return -1;
+  int dport;
+  uint64 src;
+  uint64 sport;
+  uint64 buf;
+  int maxlen;
+  argint(0, &dport);
+  argaddr(1, &src);
+  argaddr(2, &sport);
+  argaddr(3, &buf);
+  argint(4, &maxlen);
+
+  acquire(&netlock);
+
+  if(!ports[dport].binded){
+    release(&netlock);
+    return -1;
+  }
+
+  int head = ports[dport].head;
+  // int tail = ports[dport].tail;
+  while(ports[dport].tail - ports[dport].head <= 0) //写成tail - head
+    sleep(&ports[dport], &netlock);
+  head = head % PORT_BUF_SIZE;
+  struct proc *p = myproc();
+  if(copyout(p->pagetable, src, (char *)&ports[dport].packetq[head].src, sizeof(int)) < 0){
+    release(&netlock);
+    return -1;
+  }
+  if(copyout(p->pagetable, sport, (char *)&ports[dport].packetq[head].sport, sizeof(short)) < 0){
+    release(&netlock);
+    return -1;
+  }
+
+  int mlen = maxlen > ports[dport].packetq[head].length ? ports[dport].packetq[head].length : maxlen;
+  if(copyout(p->pagetable, buf, ports[dport].packetq[head].buf, mlen) < 0){
+    release(&netlock);
+    return -1;
+  }
+
+  kfree(ports[dport].packetq[head].buf);
+  ports[dport].packetq[head].buf = 0;
+  ports[dport].head++;
+  release(&netlock);
+  return mlen;
 }
 
 // This code is lifted from FreeBSD's ping.c, and is copyright by the Regents
@@ -191,7 +263,31 @@ ip_rx(char *buf, int len)
   //
   // Your code here.
   //
-  
+  struct ip *iph = (struct ip *)(buf + sizeof(struct eth));
+  struct udp *udph = (struct udp *)(buf + sizeof(struct eth) + sizeof(struct ip));
+  char *payload = buf + sizeof(struct eth) + sizeof(struct ip) + sizeof(struct udp);
+  if(iph->ip_p == IPPROTO_UDP){
+    acquire(&netlock);
+    uint16 dport = ntohs(udph->dport);
+    if(ports[dport].binded){
+      int head = ports[dport].head;
+      int tail = ports[dport].tail;
+      if(tail - head < PORT_BUF_SIZE){
+        tail = tail % PORT_BUF_SIZE;
+        ports[dport].packetq[tail].buf = kalloc();
+        memmove(ports[dport].packetq[tail].buf, payload, ntohs(udph->ulen) - sizeof(struct udp));  //一开始把payload写成了buf，这种bug很难调，注意要细心细心细心！
+        ports[dport].packetq[tail].sport = ntohs(udph->sport);
+        ports[dport].packetq[tail].length = ntohs(udph->ulen) - sizeof(struct udp);
+        ports[dport].packetq[tail].src = ntohl(iph->ip_src);
+        ports[dport].tail++;
+        if(ports[dport].tail - ports[dport].head >= 1){ //写成ports[dport].tail - ports[dport].tail 这种错误太多了，该多写写代码了
+          wakeup(&ports[dport]);
+        }
+      }
+    }
+    release(&netlock);
+  }
+  kfree((void *)buf);
 }
 
 //
