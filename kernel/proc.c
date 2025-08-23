@@ -143,10 +143,10 @@ found:
   // Set up new context to start executing at forkret,
   // which returns to user space.
   memset(&p->context, 0, sizeof(p->context));
-  p->context.ra = (uint64)forkret;
+  p->context.ra = (uint64)forkret;  // why? 此处p是child，因此scheduler调度p时，p会通过forkret返回用户空间，太巧妙了
   p->context.sp = p->kstack + PGSIZE;
 
-  return p;
+  return p; // 父进程正常返回p
 }
 
 // free a proc structure and the data hanging from it,

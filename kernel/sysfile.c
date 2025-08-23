@@ -302,50 +302,61 @@ create(char *path, short type, short major, short minor)
 }
 
 uint64
-sys_open(void)
+open(char *path, int omode, int depth)
 {
-  char path[MAXPATH];
-  int fd, omode;
+  int fd;
   struct file *f;
   struct inode *ip;
-  int n;
 
-  argint(1, &omode);
-  if((n = argstr(0, path, MAXPATH)) < 0)
+  if(depth > 10){ 
+    // printf("depth > 10\n");
     return -1;
-
-  begin_op();
+  }
 
   if(omode & O_CREATE){
     ip = create(path, T_FILE, 0, 0);
     if(ip == 0){
-      end_op();
       return -1;
     }
   } else {
     if((ip = namei(path)) == 0){
-      end_op();
+      // printf("namei fail path:%s\n", path);
       return -1;
     }
     ilock(ip);
     if(ip->type == T_DIR && omode != O_RDONLY){
       iunlockput(ip);
-      end_op();
       return -1;
     }
   }
 
   if(ip->type == T_DEVICE && (ip->major < 0 || ip->major >= NDEV)){
     iunlockput(ip);
-    end_op();
     return -1;
+  }
+
+  if(ip->type == T_SYMLINK && !(omode & O_NOFOLLOW)){
+    char npath[MAXPATH];
+    if(readi(ip, 0, (uint64)npath, 0, MAXPATH) < 0){
+      iunlockput(ip);
+      return -1;
+    }
+    iunlockput(ip);
+    /*
+    printf("open npath:%s\n", npath);
+    for(int i = 0; i < MAXPATH; i++){
+      consputc(npath[i]);
+    }
+    consputc('\n');
+    */
+    return open(npath, omode, depth+1); // 要的是fd，直接return open就行，为什么写fd = open呢，脑子想什么呢？
   }
 
   if((f = filealloc()) == 0 || (fd = fdalloc(f)) < 0){
     if(f)
       fileclose(f);
     iunlockput(ip);
-    end_op();
+    //printf("f alloc fail\n");
     return -1;
   }
 
@@ -365,6 +376,24 @@ sys_open(void)
   }
 
   iunlock(ip);
+
+  return fd;
+}
+
+uint64
+sys_open(void)
+{
+  char path[MAXPATH];
+  int fd, omode;
+  int n;
+
+  argint(1, &omode);
+
+  if((n = argstr(0, path, MAXPATH)) < 0)
+    return -1;
+
+  begin_op();
+  fd = open(path, omode, 0);
   end_op();
 
   return fd;
@@ -501,5 +530,47 @@ sys_pipe(void)
     fileclose(wf);
     return -1;
   }
+  return 0;
+}
+
+uint64
+sys_symlink(void)
+{
+  char target[MAXPATH], path[MAXPATH];
+
+  if(argstr(0, target, MAXPATH) < 0 || argstr(1, path, MAXPATH) < 0)
+    return -1;
+
+  struct inode *ip;
+  begin_op();
+
+  if((ip = create(path, T_SYMLINK, 0, 0)) == 0){
+    end_op();
+    return -1;
+  }
+
+  int len = strlen(target)+1;
+  // target[len-1] = '5';
+  //printf("%s\n",target);
+  if(writei(ip, 0, (uint64)target, 0, len) != len){ //为什么strlen(target)不行？该处打印path没问题，当解析符号链接时，读出来的path后面会多一些奇快的字符（比如 '4'）
+    iunlockput(ip);
+    end_op();
+    return -1;
+  }
+  /*
+  char npath[MAXPATH];
+  if(readi(ip, 0, (uint64)npath, 0, MAXPATH) < 0){
+    iunlockput(ip);
+    return -1;
+  }
+  printf("symlink:%s\n", npath);
+  consputc(npath[14]);
+  for(int i = 0; i < MAXPATH; i++){
+    consputc(npath[i]);
+  }
+  consputc('\n');
+  */
+  iunlockput(ip);
+  end_op();
   return 0;
 }

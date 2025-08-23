@@ -69,11 +69,11 @@ balloc(uint dev)
   struct buf *bp;
 
   bp = 0;
-  for(b = 0; b < sb.size; b += BPB){
+  for(b = 0; b < sb.size; b += BPB){  // check every block
     bp = bread(dev, BBLOCK(b, sb));
-    for(bi = 0; bi < BPB && b + bi < sb.size; bi++){
-      m = 1 << (bi % 8);
-      if((bp->data[bi/8] & m) == 0){  // Is block free?
+    for(bi = 0; bi < BPB && b + bi < sb.size; bi++){  // check every bit in the block
+      m = 1 << (bi % 8);  // bit in byte
+      if((bp->data[bi/8] & m) == 0){  // Is block free? (bi/8 ---> position of byte, we read byte)
         bp->data[bi/8] |= m;  // Mark block in use.
         log_write(bp);
         brelse(bp);
@@ -717,12 +717,14 @@ namex(char *path, int nameiparent, char *name)
     ip = idup(myproc()->cwd);
 
   while((path = skipelem(path, name)) != 0){
+    // ip : dir now , name : next in dir , path : after name
+    // ip/name/path
     ilock(ip);
     if(ip->type != T_DIR){
       iunlockput(ip);
       return 0;
     }
-    if(nameiparent && *path == '\0'){
+    if(nameiparent && *path == '\0'){ // path = "", then name is the last elem , and ip is parent
       // Stop one level early.
       iunlock(ip);
       return ip;
