@@ -5,6 +5,10 @@
 #include "spinlock.h"
 #include "proc.h"
 #include "defs.h"
+#include "sleeplock.h"
+#include "fs.h"
+#include "file.h"
+#include "fcntl.h"
 
 struct spinlock tickslock;
 uint ticks;
@@ -65,9 +69,43 @@ usertrap(void)
     intr_on();
 
     syscall();
+  } else if(r_scause() == 13 || r_scause() == 15){
+    uint64 saddr = r_stval();
+    int i;
+    for(i = 0; i < NVMA; i++){
+      if(p->vma[i].valid && p->vma[i].addr <= saddr && saddr < (p->vma[i].addr + p->vma[i].len))
+        break;
+    }
+    if(NVMA == i) goto bad;
+    void *pa = kalloc();
+    if(0 == pa) goto bad;
+    memset(pa, 0, PGSIZE);
+    struct inode* ip = p->vma[i].file->ip;
+    ilock(ip);
+    if(readi(ip, 0, (uint64)pa, p->vma[i].offset + PGROUNDDOWN(saddr - p->vma[i].addr), PGSIZE) < 0){ // align needed?
+      iunlock(ip);  // page aligned, so we use PGROUNDDOWN to get addr page aligned relative to offset
+      kfree(pa);
+      printf("readi failed!\n");
+      goto bad;
+    }
+    iunlock(ip);
+    int perm = PTE_U;
+    if(p->vma[i].prot & PROT_READ) perm |= PTE_R;
+    if(p->vma[i].prot & PROT_WRITE) perm |= PTE_W;
+    if(p->vma[i].prot & PROT_EXEC) perm |= PTE_X;
+    if((r_scause() == 13 && !(p->vma[i].prot & PROT_READ))||(r_scause() == 15 && !(p->vma[i].prot & PROT_WRITE))){
+      kfree(pa);
+      goto bad;
+    }
+    if(mappages(p->pagetable, PGROUNDDOWN(saddr), PGSIZE, (uint64)pa, perm) < 0){
+      printf("mappages failed!\n");
+      kfree(pa);
+      goto bad;
+    }
   } else if((which_dev = devintr()) != 0){
     // ok
   } else {
+  bad:
     printf("usertrap(): unexpected scause 0x%lx pid=%d\n", r_scause(), p->pid);
     printf("            sepc=0x%lx stval=0x%lx\n", r_sepc(), r_stval());
     setkilled(p);

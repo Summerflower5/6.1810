@@ -5,6 +5,10 @@
 #include "spinlock.h"
 #include "proc.h"
 #include "defs.h"
+#include "sleeplock.h"
+#include "fcntl.h"
+#include "fs.h"
+#include "file.h"
 
 struct cpu cpus[NCPU];
 
@@ -145,6 +149,8 @@ found:
   memset(&p->context, 0, sizeof(p->context));
   p->context.ra = (uint64)forkret;
   p->context.sp = p->kstack + PGSIZE;
+  p->mmap_top = MMAPTOP;
+  memset(p->vma, 0, sizeof(p->vma));
 
   return p;
 }
@@ -308,6 +314,13 @@ fork(void)
       np->ofile[i] = filedup(p->ofile[i]);
   np->cwd = idup(p->cwd);
 
+  for(i = 0; i < NVMA; i++){
+    np->vma[i] = p->vma[i];
+    if(p->vma[i].valid)
+      filedup(np->vma[i].file); // attention!!!
+  }
+  np->mmap_top = p->mmap_top;
+
   safestrcpy(np->name, p->name, sizeof(p->name));
 
   pid = np->pid;
@@ -350,6 +363,34 @@ exit(int status)
 
   if(p == initproc)
     panic("init exiting");
+
+  for(int i = 0; i < NVMA; i++){
+    if(p->vma[i].valid){
+      for(uint64 j = p->vma[i].addr; j < p->vma[i].addr + p->vma[i].len; j += PGSIZE){
+        uint64 pa = walkaddr(p->pagetable, j);
+        if(pa != 0){
+          if((p->vma[i].flags & MAP_SHARED) && (p->vma[i].prot & PROT_WRITE)){
+            struct inode *ip = p->vma[i].file->ip;
+            begin_op();
+            ilock(ip);
+            int n = PGSIZE;
+            if(p->vma[i].offset + j - p->vma[i].addr + n > ip->size)
+              n = ip->size - p->vma[i].offset - (j - p->vma[i].addr);
+            if(writei(ip, 0, pa, p->vma[i].offset + j - p->vma[i].addr, n) < 0){
+              iunlock(ip);
+              end_op();
+              panic("exit writei failed!\n");
+            }
+            iunlock(ip);
+            end_op();
+          }
+          uvmunmap(p->pagetable, j, 1, 1);
+        }
+      }
+      fileclose(p->vma[i].file);
+      p->vma[i].valid = 0;
+    }
+  }
 
   // Close all open files.
   for(int fd = 0; fd < NOFILE; fd++){

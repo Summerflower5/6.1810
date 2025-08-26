@@ -16,6 +16,7 @@
 #include "file.h"
 #include "fcntl.h"
 
+#define min(a, b) ((a) < (b) ? (a) : (b))
 // Fetch the nth word-sized system call argument as a file descriptor
 // and return both the descriptor and the corresponding struct file.
 static int
@@ -501,5 +502,154 @@ sys_pipe(void)
     fileclose(wf);
     return -1;
   }
+  return 0;
+}
+
+void
+updatemmaptop(void)
+{
+  struct proc *p = myproc();
+  for(int i = 0 ; i < NVMA ; i++){
+    if(p->vma[i].valid && p->vma[i].addr != 0)
+      p->mmap_top = min(p->mmap_top, p->vma[i].addr);
+  }
+}
+
+uint64
+get_unmapped_area(unsigned long len)
+{
+  struct proc *p = myproc();
+  for(int i = 1 ; i < NVMA ; i++){
+    if(p->vma[i].valid){
+      if(p->vma[i-1].addr - PGROUNDUP(p->vma[i].addr + p->vma[i].len) >= PGROUNDUP(len)){ // fragment
+        return PGROUNDUP(p->vma[i].addr + p->vma[i].len);
+      }
+    }else { // no fragment
+      break;
+    }
+  }
+  p->mmap_top = PGROUNDDOWN(p->mmap_top - len);
+  return p->mmap_top;  // get unmapped area
+}
+
+uint64
+sys_mmap(void)
+{
+  uint64 addr;
+  unsigned long len;
+  int prot, flags, fd;
+  uint64 offset;
+  struct file *f;
+  struct proc *p = myproc();
+
+  argaddr(0, &addr);
+  argaddr(1, &len);
+  argint(2, &prot);
+  argint(3, &flags);
+  if(argfd(4, &fd, &f) < 0)
+    return -1;
+  argaddr(5, &offset);
+  
+  if(!f->writable && (prot & PROT_WRITE) && (flags & MAP_SHARED)){
+    printf("file not writable!\n");
+    return -1;
+  }
+
+  if(0 == addr){
+    addr = get_unmapped_area(len);
+  }else {
+    if(addr < p->sz){
+      printf("invalid addr!\n");
+      return -1;
+    }
+  }
+  
+  for (int i = 0; i < NVMA; i++){
+    if(p->vma[i].valid && p->vma[i].addr > addr)
+      continue;
+    for(int j = NVMA-1; j > i; j--) // dsc order
+      p->vma[j] = p->vma[j-1];
+    p->vma[i].addr = addr;
+    p->vma[i].file = filedup(f);
+    p->vma[i].flags = flags;
+    p->vma[i].len = len;
+    p->vma[i].offset = offset;
+    p->vma[i].prot = prot;
+    p->vma[i].valid = 1;
+    break;
+  }
+  
+  // updatemmaptop();
+  return addr;
+}
+
+uint64
+sys_munmap(void)
+{
+  uint64 addr;
+  unsigned long len;
+  argaddr(0, &addr);
+  argaddr(1, &len);
+  struct proc *p = myproc();
+
+  if(addr % PGSIZE != 0 || len % PGSIZE != 0){
+    printf("not aligned unmap!\n");
+    return -1;
+  }
+
+  int i;
+  for(i = 0; i < NVMA; i++){
+    if(p->vma[i].valid && p->vma[i].addr <= addr && addr < (p->vma[i].addr + p->vma[i].len))
+      break;
+  }
+  if(NVMA == i){
+    printf("not mapped addr!\n");
+    return -1;
+  }
+  /*
+  // not precise enough
+  if((p->vma[i].flags & MAP_SHARED) && (p->vma[i].prot & PROT_WRITE)){
+    filewrite(p->vma[i].file, addr, len);
+  }
+  uvmunmap(p->pagetable, addr, PGROUNDUP(len)/PGSIZE, 1);
+  */
+  for(uint64 j = addr; j < addr + len; j += PGSIZE){
+    uint64 pa = walkaddr(p->pagetable, j);
+    if(pa != 0){
+      if((p->vma[i].flags & MAP_SHARED) && (p->vma[i].prot & PROT_WRITE)){
+        struct inode *ip = p->vma[i].file->ip;
+        begin_op();
+        ilock(ip);
+        int n = PGSIZE;
+        if(p->vma[i].offset + j - p->vma[i].addr + n > ip->size)
+          n = ip->size - p->vma[i].offset - (j - p->vma[i].addr);
+        if(writei(ip, 0, pa, p->vma[i].offset + j - p->vma[i].addr, n) < 0){
+          iunlock(ip);
+          end_op();
+          panic("munmap writei failed!\n");
+        }
+        iunlock(ip);
+        end_op();
+      }
+      uvmunmap(p->pagetable, j, 1, 1);
+    }
+  }
+
+  if(addr == p->vma[i].addr && len == p->vma[i].len){
+    fileclose(p->vma[i].file);
+    p->vma[i].valid = 0;
+    for(int j = NVMA-1; j > i; j--)
+      p->vma[j] = p->vma[j-1];
+  }else if(addr == p->vma[i].addr){
+    p->vma[i].addr += len;
+    p->vma[i].len -= len;
+    p->vma[i].offset += len;  // omitted...
+  }else if(addr + len == p->vma[i].addr + p->vma[i].len){
+    p->vma[i].len -= len;
+  }else {
+    printf("invalid unmap area!\n");
+    return -1;
+  }
+  updatemmaptop();
   return 0;
 }
